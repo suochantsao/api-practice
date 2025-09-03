@@ -1,4 +1,4 @@
-const pool = require('../config/database');
+const supabase = require('../config/database');
 
 /**
  * 用戶控制器
@@ -39,24 +39,28 @@ const userController = {
                 });
             }
 
-            // 插入資料庫
-            // RETURNING * 表示返回新建立的記錄
-            const result = await pool.query(
-                'INSERT INTO users (name, email, age) VALUES ($1, $2, $3) RETURNING *',
-                [name, email, age || null]
-            );
+            // 插入 Supabase 資料庫
+            const { data, error } = await supabase
+                .from('users')
+                .insert([{ name, email, age: age || null }])
+                .select()
+                .single();
+
+            if (error) {
+                throw error;
+            }
 
             res.status(201).json({
                 success: true,
                 message: '用戶建立成功',
-                data: result.rows[0]
+                data: data
             });
 
         } catch (error) {
             console.error('建立用戶錯誤:', error);
 
-            // PostgreSQL 唯一約束錯誤（Email 重複）
-            if (error.code === '23505') {
+            // Supabase 唯一約束錯誤（Email 重複）
+            if (error.code === '23505' || error.message?.includes('duplicate key')) {
                 return res.status(409).json({
                     success: false,
                     message: 'Email 已存在',
@@ -93,22 +97,25 @@ const userController = {
             }
 
             // 取得總記錄數
-            const countResult = await pool.query('SELECT COUNT(*) FROM users');
-            const totalUsers = parseInt(countResult.rows[0].count);
+            const { count: totalUsers } = await supabase
+                .from('users')
+                .select('*', { count: 'exact', head: true });
 
             // 取得用戶資料（分頁）
-            const result = await pool.query(
-                `SELECT id, name, email, age, created_at, updated_at 
-         FROM users 
-         ORDER BY ${sortBy} ${sortOrder} 
-         LIMIT $1 OFFSET $2`,
-                [limit, offset]
-            );
+            const { data, error } = await supabase
+                .from('users')
+                .select('id, name, email, age, created_at, updated_at')
+                .order(sortBy, { ascending: sortOrder === 'ASC' })
+                .range(offset, offset + limit - 1);
+
+            if (error) {
+                throw error;
+            }
 
             res.json({
                 success: true,
                 message: '取得用戶列表成功',
-                data: result.rows,
+                data: data,
                 pagination: {
                     currentPage: page,
                     totalPages: Math.ceil(totalUsers / limit),
@@ -141,12 +148,13 @@ const userController = {
                 });
             }
 
-            const result = await pool.query(
-                'SELECT id, name, email, age, created_at, updated_at FROM users WHERE id = $1',
-                [id]
-            );
+            const { data, error } = await supabase
+                .from('users')
+                .select('id, name, email, age, created_at, updated_at')
+                .eq('id', id)
+                .single();
 
-            if (result.rows.length === 0) {
+            if (error || !data) {
                 return res.status(404).json({
                     success: false,
                     message: '找不到指定的用戶',
@@ -157,7 +165,7 @@ const userController = {
             res.json({
                 success: true,
                 message: '取得用戶資料成功',
-                data: result.rows[0]
+                data: data
             });
 
         } catch (error) {
@@ -186,8 +194,13 @@ const userController = {
             }
 
             // 檢查用戶是否存在
-            const existingUser = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
-            if (existingUser.rows.length === 0) {
+            const { data: existingUser, error: checkError } = await supabase
+                .from('users')
+                .select('*')
+                .eq('id', id)
+                .single();
+            
+            if (checkError || !existingUser) {
                 return res.status(404).json({
                     success: false,
                     message: '找不到指定的用戶',
@@ -195,15 +208,11 @@ const userController = {
                 });
             }
 
-            // 動態建立更新查詢
-            const updates = [];
-            const values = [];
-            let paramCount = 1;
+            // 準備更新資料
+            const updateData = {};
 
             if (name) {
-                updates.push(`name = $${paramCount}`);
-                values.push(name);
-                paramCount++;
+                updateData.name = name;
             }
 
             if (email) {
@@ -216,9 +225,7 @@ const userController = {
                         data: null
                     });
                 }
-                updates.push(`email = $${paramCount}`);
-                values.push(email);
-                paramCount++;
+                updateData.email = email;
             }
 
             if (age !== undefined) {
@@ -229,12 +236,10 @@ const userController = {
                         data: null
                     });
                 }
-                updates.push(`age = $${paramCount}`);
-                values.push(age);
-                paramCount++;
+                updateData.age = age;
             }
 
-            if (updates.length === 0) {
+            if (Object.keys(updateData).length === 0) {
                 return res.status(400).json({
                     success: false,
                     message: '沒有提供要更新的欄位',
@@ -242,29 +247,28 @@ const userController = {
                 });
             }
 
-            // 添加 ID 到參數列表
-            values.push(id);
+            const { data, error } = await supabase
+                .from('users')
+                .update(updateData)
+                .eq('id', id)
+                .select()
+                .single();
 
-            const updateQuery = `
-        UPDATE users 
-        SET ${updates.join(', ')} 
-        WHERE id = $${paramCount} 
-        RETURNING *
-      `;
-
-            const result = await pool.query(updateQuery, values);
+            if (error) {
+                throw error;
+            }
 
             res.json({
                 success: true,
                 message: '用戶資料更新成功',
-                data: result.rows[0]
+                data: data
             });
 
         } catch (error) {
             console.error('更新用戶錯誤:', error);
 
             // Email 重複錯誤
-            if (error.code === '23505') {
+            if (error.code === '23505' || error.message?.includes('duplicate key')) {
                 return res.status(409).json({
                     success: false,
                     message: 'Email 已存在',
@@ -295,8 +299,13 @@ const userController = {
             }
 
             // 先檢查用戶是否存在
-            const existingUser = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
-            if (existingUser.rows.length === 0) {
+            const { data: existingUser, error: checkError } = await supabase
+                .from('users')
+                .select('*')
+                .eq('id', id)
+                .single();
+            
+            if (checkError || !existingUser) {
                 return res.status(404).json({
                     success: false,
                     message: '找不到指定的用戶',
@@ -305,7 +314,14 @@ const userController = {
             }
 
             // 刪除用戶
-            await pool.query('DELETE FROM users WHERE id = $1', [id]);
+            const { error } = await supabase
+                .from('users')
+                .delete()
+                .eq('id', id);
+
+            if (error) {
+                throw error;
+            }
 
             res.json({
                 success: true,
